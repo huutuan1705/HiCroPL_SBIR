@@ -7,8 +7,8 @@ def cross_loss(feature_1, feature_2, temperature):
     labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
     labels = labels.to(device)
 
-    feature_1 = F.normalize(feature_1, dim=1)
-    feature_2 = F.normalize(feature_2, dim=1)
+    # feature_1 = F.normalize(feature_1, dim=1)
+    # feature_2 = F.normalize(feature_2, dim=1)
     features = torch.cat((feature_1, feature_2), dim=0)  # (2*B, Feat_dim)
 
     similarity_matrix = torch.matmul(features, features.T)  # (2*B, 2*B)
@@ -50,7 +50,6 @@ def loss_fn_hicropl(args, features):
         _neg_feat, label,
         photo_aug_feat, sketch_aug_feat,
         logits_photo_aug, logits_sketch_aug,
-        text_feat_photo, text_feat_sketch,
         *_
     ) = features
 
@@ -84,7 +83,7 @@ def loss_fn_hicropl(args, features):
     loss_consistency = 1 * (loss_consistency_photo + loss_consistency_sketch)
 
     # --- L5: Text alignment InfoNCE (photo-text vs sketch-text) ---
-    loss_text_align = 0 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
+    # loss_text_align = 0 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
 
     # Total loss = L1 + L2 + L3 + L4 + L5.
     total_loss = (
@@ -92,7 +91,7 @@ def loss_fn_hicropl(args, features):
         + loss_ce
         + loss_ce_aug
         + loss_consistency
-        + loss_text_align
+        # + loss_text_align
     )
 
     return total_loss

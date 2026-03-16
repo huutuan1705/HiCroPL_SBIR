@@ -97,7 +97,7 @@ if __name__ == '__main__':
     
     clip_model_frozen, _ = clip.load(opts.backbone, device=device, design_details=frozen_design_details)
     clip_model_frozen.float()
-    clip_model_frozen.eval()
+    # clip_model_frozen.eval()
     
     # Extract classnames for Context Learner initialization
     classnames = list(train_dataset.all_categories)

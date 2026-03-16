@@ -41,11 +41,35 @@ UNSEEN_CLASSES = {
         "pipe (for smoking)", "tv"
     ],
     "quickdraw": [
-        "airplane", "alarm_clock", "ant", "apple", "axe", "banana", "bat",
-        "bear", "bee", "bench", "bicycle", "bread", "bus", "butterfly",
-        "cactus", "cake", "camel", "candle", "car", "castle", "cat", "chair",
-        "church", "couch", "cow", "crab", "crocodilian", "dolphin",
-        "eyeglasses", "guitar"
+        "alarm_clock", "axe",
+        "bandage",
+        "bat",
+        "beach",
+        "bread",
+        "bus",
+        "cake",
+        "campfire",
+        "cruise ship",
+        "dolphin",
+        "eiffel tower",
+        "eyeglasses",
+        "fire_hydrant",
+        "flower",
+        "giraffe",
+        "hamburger",
+        "helicopter",
+        "hot-air_balloon",
+        "kangaroo",
+        "map",
+        "megaphone",
+        "moon",
+        "motorcycle",
+        "palm tree",
+        "parrot",
+        "raccoon",
+        "sailboat",
+        "skyscraper",
+        "windmill"
     ]
 }
 
