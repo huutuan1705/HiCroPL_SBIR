@@ -84,12 +84,11 @@ if __name__ == '__main__':
 
     # Distillation/reference branch follows CoPrompt style: plain CLIP without prompt routing.
     frozen_design_details = {
-        "trainer": "CoOp",
+        "trainer": "IVLP",
         "vision_depth": 0,
         "language_depth": 0,
         "vision_ctx": 0,
         "language_ctx": 0,
-        "maple_length": opts.n_ctx,
     }
 
     clip_model, _ = clip.load(opts.backbone, device=device, design_details=design_details)
