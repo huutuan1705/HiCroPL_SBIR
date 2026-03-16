@@ -17,11 +17,11 @@ def freeze_model(m):
     m.requires_grad_(False)
 
 def freeze_all_but_bn(m):
-    if not isinstance(m, torch.nn.LayerNorm):
-        if hasattr(m, 'weight') and m.weight is not None:
-            m.weight.requires_grad_(False)
-        if hasattr(m, 'bias') and m.bias is not None:
-            m.bias.requires_grad_(False)
+    if isinstance(m, torch.nn.LayerNorm):
+        return
+    # Freeze only the parameters owned by this module to avoid repeatedly touching children.
+    for p in m.parameters(recurse=False):
+        p.requires_grad_(False)
 
 def unfreeze_layernorm_params(module):
     for child in module.modules():
@@ -75,13 +75,16 @@ class CustomCLIP(nn.Module):
         self.clip_model_photo = copy.deepcopy(clip_model)
         self.clip_model_sketch = copy.deepcopy(clip_model)
         # E/F aug branches: standard ViT (CoOp design), LN trainable, no prompt injection
-        
+        self.clip_model_photo_aug = copy.deepcopy(clip_model_frozen)
+        self.clip_model_sketch_aug = copy.deepcopy(clip_model_frozen)
         self.clip_model_frozen = clip_model_frozen
         
         # Freeze weights, keeping LayerNorm trainable for A/B/C/D and E/F
         self.clip_model_photo.apply(freeze_all_but_bn)
         self.clip_model_sketch.apply(freeze_all_but_bn)
-        self.clip_model_frozen.apply(freeze_all_but_bn)  # Frozen model stays completely frozen
+        self.clip_model_photo_aug.apply(freeze_all_but_bn)
+        self.clip_model_sketch_aug.apply(freeze_all_but_bn)
+        self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
         
         self.dtype = self.clip_model_photo.dtype
         
@@ -113,7 +116,8 @@ class CustomCLIP(nn.Module):
         )
 
         # --- 2. Encoders with Deep Injection (A/B/C/D prompted branches) ---
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder_photo = TextEncoder(self.clip_model_photo)
+        self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
         self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
         # E/F aug branches use clip_model_photo_aug/sketch_aug .visual directly
@@ -137,12 +141,15 @@ class CustomCLIP(nn.Module):
         print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
         
         # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
-
+        unfreeze_layernorm_params(self.text_encoder_photo)
+        unfreeze_layernorm_params(self.text_encoder_sketch)
+        unfreeze_layernorm_params(self.visual_encoder_photo)
+        unfreeze_layernorm_params(self.visual_encoder_sketch)
+        # E/F: freeze_all_but_bn already keeps LN trainable on clip_model_photo/sketch_aug
+        
         # --- 3. Frozen Reference Model ---
         self.frozen_visual_encoder = clip_model_frozen.visual
-        self.image_adapter_m = 0.1
-        self.text_adapter_m = 0.1
-        
+
     def forward(self, x, classnames):
         """
         Forward pass for training with augmentation support.
@@ -160,51 +167,53 @@ class CustomCLIP(nn.Module):
             text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
         ) = self.prompt_learner_sketch(classnames)
 
+        # 1.1 Frozen teacher targets (no gradients)
+        with torch.no_grad():
+            text_feat_fixed_photo = self.clip_model_frozen.encode_text(tok_p)
+            text_feat_fixed_photo = text_feat_fixed_photo / text_feat_fixed_photo.norm(dim=-1, keepdim=True)
+
+            text_feat_fixed_sketch = self.clip_model_frozen.encode_text(tok_s)
+            text_feat_fixed_sketch = text_feat_fixed_sketch / text_feat_fixed_sketch.norm(dim=-1, keepdim=True)
+
+            photo_feat_fixed = self.frozen_visual_encoder(photo_tensor.type(self.dtype))
+            photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
+
+            sketch_feat_fixed = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
+            sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
+
         # 2. Extract Text Features then apply shared text adapter (A/B only)
-        text_feat_photo = self.text_encoder(text_input_p, tok_p, deep_t_p)
-        x_b = self.adapter_text(text_feat_photo)
-        text_feat_photo = (
-            self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
-        )
+        text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
+        text_feat_photo = self.adapter_text(text_feat_photo)
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
-        text_feat_sketch = self.text_encoder(text_input_s, tok_s, deep_t_s)
-        x_b = self.adapter_text(text_feat_sketch)
-        text_feat_sketch = (
-            self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
-        )
+        text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
+        text_feat_sketch = self.adapter_text(text_feat_sketch)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
         # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
-        photo_aug_feat = self.frozen_visual_encoder(photo_aug_tensor.type(self.dtype))
+        photo_aug_feat = self.clip_model_photo_aug.visual(photo_aug_tensor.type(self.dtype))
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
-        sketch_aug_feat = self.frozen_visual_encoder(sk_aug_tensor.type(self.dtype))
+        sketch_aug_feat = self.clip_model_sketch_aug.visual(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
 
         # 4. Extract Visual Features then apply shared image adapter (C/D only)
         # - Photo (C): replace old fixed-teacher fusion with augmentation fusion
         photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
-        x_a = self.adapter_photo(photo_feat)
-        photo_feat = (
-            self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
-        )
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        photo_feat = self.adapter_photo(photo_feat)
+        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        # photo_feat = photo_feat + photo_aug_feat
+        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch (D): replace old fixed-teacher fusion with augmentation fusion
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
-        x_a = self.adapter_photo(sketch_feat)
-        sketch_feat = (
-            self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
-        )
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        sketch_feat = self.adapter_photo(sketch_feat)
+        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        # sketch_feat = sketch_feat + sketch_aug_feat
+        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
-        x_a = self.adapter_photo(neg_feat)
-        neg_feat = (
-            self.image_adapter_m * x_a + (1 - self.image_adapter_m) * neg_feat
-        )
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
@@ -222,7 +231,10 @@ class CustomCLIP(nn.Module):
             sketch_feat, logits_sketch,
             neg_feat, label,
             photo_aug_feat, sketch_aug_feat,
-            logits_photo_aug, logits_sketch_aug
+            logits_photo_aug, logits_sketch_aug,
+            text_feat_photo, text_feat_sketch,
+            text_feat_fixed_photo, text_feat_fixed_sketch,
+            photo_feat_fixed, sketch_feat_fixed,
         )
 
 
@@ -262,67 +274,67 @@ class HiCroPL_SBIR(pl.LightningModule):
         self._cached_photo_prompts = None
         self._cached_sketch_prompts = None
 
-    # def on_train_epoch_start(self):
-    #     # Ensure that clip models are in fully eval mode during training
-    #     self.model.clip_model_frozen.eval()
-    #     self.model.clip_model_photo.eval()
-    #     self.model.clip_model_sketch.eval()
-    #     self.model.clip_model_photo_aug.eval()
-    #     self.model.clip_model_sketch_aug.eval()
+    def on_train_epoch_start(self):
+        # Ensure that clip models are in fully eval mode during training
+        self.model.clip_model_frozen.eval()
+        self.model.clip_model_photo.eval()
+        self.model.clip_model_sketch.eval()
+        self.model.clip_model_photo_aug.eval()
+        self.model.clip_model_sketch_aug.eval()
 
     def configure_optimizers(self):
-        # def add_unique_params(candidates, out_list, seen_ids):
-        #     for p in candidates:
-        #         if p.requires_grad and id(p) not in seen_ids:
-        #             seen_ids.add(id(p))
-        #             out_list.append(p)
+        def add_unique_params(candidates, out_list, seen_ids):
+            for p in candidates:
+                if p.requires_grad and id(p) not in seen_ids:
+                    seen_ids.add(id(p))
+                    out_list.append(p)
 
-        # seen_ids = set()
+        seen_ids = set()
 
-        # prompt_params = []
-        # add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
-        # add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+        prompt_params = []
+        add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
 
-        # ln_params = []
-        # ln_backbones = [
-        #     self.model.clip_model_photo,
-        #     self.model.clip_model_sketch,
-        #     self.model.clip_model_photo_aug,
-        #     self.model.clip_model_sketch_aug,
-        # ]
-        # for backbone in ln_backbones:
-        #     for module in backbone.modules():
-        #         if isinstance(module, torch.nn.LayerNorm):
-        #             add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
+        ln_params = []
+        ln_backbones = [
+            self.model.clip_model_photo,
+            self.model.clip_model_sketch,
+            self.model.clip_model_photo_aug,
+            self.model.clip_model_sketch_aug,
+        ]
+        for backbone in ln_backbones:
+            for module in backbone.modules():
+                if isinstance(module, torch.nn.LayerNorm):
+                    add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
-        # adapter_params = []
-        # add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
-        # add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
+        adapter_params = []
+        add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
+        add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
 
-        # extra_trainable_params = []
-        # for _, p in self.model.named_parameters():
-        #     if p.requires_grad and id(p) not in seen_ids:
-        #         seen_ids.add(id(p))
-        #         extra_trainable_params.append(p)
+        extra_trainable_params = []
+        for _, p in self.model.named_parameters():
+            if p.requires_grad and id(p) not in seen_ids:
+                seen_ids.add(id(p))
+                extra_trainable_params.append(p)
 
-        # non_prompt_params = ln_params + adapter_params + extra_trainable_params
+        non_prompt_params = ln_params + adapter_params + extra_trainable_params
 
-        # self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        # self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in ln_params):,}")
-        # self.print(f"Number of trainable adapter params: {sum(p.numel() for p in adapter_params):,}")
-        # if extra_trainable_params:
-        #     self.print(f"Warning: Found {len(extra_trainable_params)} unexpected trainable tensors outside prompt/LN/adapter; including them in optimizer.")
-        # self.print(f"Total trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
+        self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
+        self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in ln_params):,}")
+        self.print(f"Number of trainable adapter params: {sum(p.numel() for p in adapter_params):,}")
+        if extra_trainable_params:
+            self.print(f"Warning: Found {len(extra_trainable_params)} unexpected trainable tensors outside prompt/LN/adapter; including them in optimizer.")
+        self.print(f"Total trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
         
-        # prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
-        # clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
-        # weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
+        prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
+        clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
+        weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
 
-        # param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
-        # if non_prompt_params:
-        #     param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
+        param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
+        if non_prompt_params:
+            param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
 
-        optimizer = torch.optim.Adam(params=self.model.parameters(), lr=1e-5, weight_decay=1e-3)
+        optimizer = torch.optim.Adam(param_groups, weight_decay=weight_decay)
         
         return optimizer
 

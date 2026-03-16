@@ -9,8 +9,8 @@ parser.add_argument('--exp_name', type=str, default='LN_prompt')
 # --------------------
 
 # Path to 'Sketchy' folder holding Sketch_extended dataset. It should have 2 folders named 'sketch' and 'photo'.
-parser.add_argument('--dataset', type=str, default='sketchy_2', 
-                    choices=['sketchy_1', 'sketchy_2', 'tuberlin', 'quickdraw'],
+parser.add_argument('--dataset', type=str, default='sketchy', 
+                    choices=['sketchy', 'sketchy_ext', 'tuberlin', 'quickdraw'],
                     help='Dataset name: sketchy, sketchy_ext, tuberlin, or quickdraw')
 parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/') 
 parser.add_argument('--max_size', type=int, default=224)
@@ -55,7 +55,7 @@ parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean simil
 parser.add_argument('--mcc_ph', type=float, default=0.0, help='Target mean similarity for photo-to-photo (MCC center)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
-parser.add_argument('--use_adapter', action='store_true', default=True, help='Enable CoPrompt-style feature adapters (disabled by default for no-adapter ablation)')
+parser.add_argument('--use_adapter', action='store_true', default=False, help='Enable CoPrompt-style feature adapters (disabled by default for no-adapter ablation)')
 parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck reduction ratio when --use_adapter is enabled')
 parser.add_argument('--image_adapter_m', type=float, default=0.1, help='Deprecated: residual mixing is disabled')
 parser.add_argument('--visual_adapter_m', type=float, default=0.1, help='Deprecated alias; residual mixing is disabled')
