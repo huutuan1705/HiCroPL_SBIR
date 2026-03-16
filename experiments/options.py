@@ -9,8 +9,8 @@ parser.add_argument('--exp_name', type=str, default='LN_prompt')
 # --------------------
 
 # Path to 'Sketchy' folder holding Sketch_extended dataset. It should have 2 folders named 'sketch' and 'photo'.
-parser.add_argument('--dataset', type=str, default='sketchy', 
-                    choices=['sketchy', 'sketchy_ext', 'tuberlin', 'quickdraw'],
+parser.add_argument('--dataset', type=str, default='sketchy_2', 
+                    choices=['sketchy_1', 'sketchy_2', 'tuberlin', 'quickdraw'],
                     help='Dataset name: sketchy, sketchy_ext, tuberlin, or quickdraw')
 parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/') 
 parser.add_argument('--max_size', type=int, default=224)
